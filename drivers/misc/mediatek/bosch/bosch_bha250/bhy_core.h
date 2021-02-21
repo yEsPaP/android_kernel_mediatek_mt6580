@@ -30,7 +30,7 @@
 
 #define BHY_LEVEL_TRIGGERED_IRQ_SUPPORT
 
-//#define BHY_DEBUG
+#define BHY_DEBUG
 /*
  * BHY_RESERVE_FOR_LATER_USE:
  * We need this funtion for future use

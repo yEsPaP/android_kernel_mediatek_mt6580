@@ -3885,22 +3885,6 @@ static void __exit tpd_driver_exit(void)
     tpd_driver_remove(&tpd_device_driver);
 }
 
-#if GTP_GESTURE_WAKEUP
-void gesture_function_open(BOOL on)
-{
-	printk(KERN_ERR"gesture_function_open,on=%d\n",on);
-	if( on == 1)
-	{
-		printk(KERN_ERR"1111111111111111111111111\n");
-		gesture_function_enable =1;
-	}else
-	{
-		printk(KERN_ERR"00000000000000000000000000\n");
-		gesture_function_enable =0;
-	}
-}
-#endif
-
 module_init(tpd_driver_init);
 module_exit(tpd_driver_exit);
 
