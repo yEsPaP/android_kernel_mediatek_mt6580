@@ -9,6 +9,13 @@
 *************************/
 
 &eintc {
+	GSE_2@1 {
+		compatible = "mediatek, GSE_2-eint";
+		interrupt-parent = <0x2>;
+		interrupts = <0x1 0x8>;
+		debounce = <0x1 0x0>;
+	};
+
 	ACCDET@3 {
 		compatible = "mediatek, ACCDET-eint";
 		interrupt-parent = <&eintc>;
