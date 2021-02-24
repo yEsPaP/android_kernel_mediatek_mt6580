@@ -18,6 +18,7 @@
 #include "timed_output.h"
 
 
+#include <linux/hrtimer.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/spinlock.h>
@@ -35,13 +36,10 @@
 
 
 
-#define VERSION					"v 0.2"
+#define VERSION					"v 0.1"
 #define VIB_DEVICE				"mtk_vibrator"
 
 
-static struct task_struct *thread = NULL;
-static DECLARE_WAIT_QUEUE_HEAD(vib_waiter);
-static int vib_flag = 0;
 
 
 /******************************************************************************
@@ -80,11 +78,13 @@ do {	\
 /******************************************************************************
 Global Definations
 ******************************************************************************/
+static struct workqueue_struct *vibrator_queue;
+static struct work_struct vibrator_work;
+static struct hrtimer vibe_timer;
 static spinlock_t vibe_lock;
 static int vibe_state;
 static int ldo_state;
 static int shutdown_flag;
-static int vibe_time;
 
 /**********************************************************************************************/
 /*Vibrate operate function*/
@@ -107,88 +107,45 @@ static int vibr_Disable(void)
 }
 
 
-static int vibr_time_remine  = 0;
-static int vibr_kernel_thread_handler(void *unused)
+static void update_vibrator(struct work_struct *work)
 {
-    struct sched_param param = { .sched_priority = RTPM_PRIO_TPD };
-
-	printk("tpd_event_handler\n");
-
-    sched_setscheduler(current, SCHED_RR, &param);
-	
-	do
-	{
-		set_current_state(TASK_INTERRUPTIBLE);
-		while (vib_flag)
-		{
-			vib_flag = 0;
-			msleep(10);
-		} 
-		
-		wait_event_interruptible(vib_waiter, vib_flag != 0);
-		vib_flag = 0;
-
-		
-		set_current_state(TASK_RUNNING);
-		vibr_Enable();
-		vibe_state = 1;
-		while(vibr_time_remine)
-		{
-			if(vibr_time_remine >= 20)
-			{
-				vibr_time_remine -= 20;
-				msleep(12);
-			}
-			else
-			{
-				msleep(vibr_time_remine);
-				vibr_time_remine = 0;
-			}
-		}
+	printk("[vibrator] update_vibrator: vibe_state = %d\n", vibe_state);
+	if (value) {
+		hrtimer_start(&vibe_timer, 1000000000LL * (value / 1000) + 1000000 * (value % 1000), HRTIMER_MODE_REL);
+		value = 0;
+	}
+	if (!vibe_state)
 		vibr_Disable();
-		vibe_state = 0;
-    }
-	while (!kthread_should_stop());
-
-    return RSUCCESS;
+	else
+		vibr_Enable();
 }
 
 
 static int vibrator_get_time(struct timed_output_dev *dev)
 {
-	return vibr_time_remine;
+	if (hrtimer_active(&vibe_timer)) {
+		ktime_t r = hrtimer_get_remaining(&vibe_timer);
+
+		return ktime_to_ms(r);
+	} else
+		return 0;
 }
 
 static void vibrator_enable(struct timed_output_dev *dev, int value)
 {
-	unsigned long flags;
-int ret;
-	
-	 /**********************modify begin*************************************************/
-	
-	if (value == 0 && vibe_state == 1)   //vibrator is on and need to shutdown
-	
-	{
-		vibr_time_remine = 0;
-		msleep(10);
-		return;
-	
-	}
-	
-	/***************************modify end**************************************************/
-
-
 #if 1
 	struct vibrator_hw *hw = mt_get_cust_vibrator_hw();
 #endif
 	printk("[vibrator]vibrator_enable: vibrator first in value = %d\n", value);
 
 	spin_lock_irqsave(&vibe_lock, flags);
-
+	while (hrtimer_cancel(&vibe_timer)) {
+		printk("[vibrator]vibrator_enable: try to cancel hrtimer\n");
+	}
 
 	if (value == 0 || shutdown_flag == 1) {
 		printk("[vibrator]vibrator_enable: shutdown_flag = %d\n", shutdown_flag);
-		vibr_time_remine = 0;
+		vibe_state = 0;
 	} else {
 #if 1
 		printk("[vibrator]vibrator_enable: vibrator cust timer: %d\n", hw->vib_timer);
@@ -199,21 +156,23 @@ int ret;
 #endif
 			value = hw->vib_timer;
 #endif
-		value =  ((value < hw->vib_timer) ? hw->vib_timer : value ); 
 		value = (value > 15000 ? 15000 : value);
-		vibr_time_remine = vibe_time = value;
-		printk("[vibrator]vibrator_enable: vibrator start: %d\n", value);
-		wake_up_interruptible(&vib_waiter);vib_flag = 1;
-		printk("[vibrator] vibrator_enable queue_work = %d\n",ret);
+		vibe_state = 1;
 	}
 
 	spin_unlock_irqrestore(&vibe_lock, flags);
-	
-	
-	
+	printk("[vibrator]vibrator_enable: vibrator start: %d\n", value);
+	printk("[vibrator] vibrator_enable queue_work = %d\n", queue_work(vibrator_queue, &vibrator_work));
 }
 
 
+static enum hrtimer_restart vibrator_timer_func(struct hrtimer *timer)
+{
+	vibe_state = 0;
+	printk("[vibrator]vibrator_timer_func: vibrator will disable\n");
+	queue_work(vibrator_queue, &vibrator_work);
+	return HRTIMER_NORESTART;
+}
 
 static struct timed_output_dev mtk_vibrator = {
 	.name = "vibrator",
@@ -278,7 +237,7 @@ static ssize_t store_vibr_on(struct device *dev, struct device_attribute *attr, 
 	return size;
 }
 
-static DEVICE_ATTR(vibr_on, 0777, NULL, store_vibr_on);
+static DEVICE_ATTR(vibr_on, 0220, NULL, store_vibr_on);
 
 /******************************************************************************
  * vib_mod_init
@@ -310,9 +269,13 @@ static int vib_mod_init(void)
 		return ret;
 	}
 
+	vibrator_queue = create_singlethread_workqueue(VIB_DEVICE);
+	INIT_WORK(&vibrator_work, update_vibrator);
 	spin_lock_init(&vibe_lock);
 	shutdown_flag = 0;
 	vibe_state = 0;
+	hrtimer_init(&vibe_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	vibe_timer.function = vibrator_timer_func;
 
 	timed_output_dev_register(&mtk_vibrator);
 
@@ -328,14 +291,6 @@ static int vib_mod_init(void)
 		printk("[vibrator]device_create_file vibr_on fail!\n");
 	}
 
-	//start kernel thread to 
-	thread = kthread_run(vibr_kernel_thread_handler, 0, VIB_DEVICE);
-    if (IS_ERR(thread))
-	{
-        err = PTR_ERR(thread);
-        printk("[vibrator] failed to create kernel thread: %d\n", err);
-    }
-	
 	printk("[vibrator]vib_mod_init Done\n");
 
 	return RSUCCESS;
@@ -362,6 +317,8 @@ static void vib_mod_exit(void)
 {
 	printk("MediaTek MTK vibrator driver unregister, version %s\n", VERSION);
 
+	if (vibrator_queue)
+		destroy_workqueue(vibrator_queue);
 	printk("[vibrator]vib_mod_exit Done\n");
 }
 module_init(vib_mod_init);
